@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>t3rribox API: upload files with curl, Node.js or Python</title>
+  <meta name="description" content="Upload files and get short links from your own code. Multipart, raw and base64 uploads, chunked uploads for big files, JSON responses and open CORS.">
+  <link rel="canonical" href="{{CANONICAL}}">
+  {{GOOGLE_META}}
+  <meta name="theme-color" content="#0f1c22">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="t3rribox">
+  <meta property="og:title" content="t3rribox API: upload files with curl, Node.js or Python">
+  <meta property="og:description" content="Upload files and get short links from your own code. No account or key needed.">
+  <meta property="og:url" content="{{CANONICAL}}">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Big+Shoulders+Display:wght@800&display=swap">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="wrap wide prose">
+    <header class="top">
+      <a class="mark" href="/">t3rribox</a>
+      <nav><a href="/">Upload a file</a></nav>
+    </header>
+
+    <h1>Upload API</h1>
+    <p class="lead">Upload files from your own code and get the same short links as the website. No account or key is needed. Every response is JSON, and CORS is open, so it works from browsers too.</p>
+
+    <h2>Upload a file</h2>
+    <div class="route"><span class="verb">POST</span><code>{{SITE_URL}}/api/upload</code></div>
+    <p>Send the file in any one of the three ways below. The extension of the filename becomes the extension of the link.</p>
+
+    <h3>Multipart form</h3>
+    <p>Use the field name <code>file</code>.</p>
+<pre><code>curl -F "file=@photo.jpg" {{SITE_URL}}/api/upload</code></pre>
+
+    <h3>Raw bytes</h3>
+    <p>Put the bytes in the body and name the file with the <code>X-Filename</code> header or a <code>?filename=</code> parameter. With no name, the extension is guessed from <code>Content-Type</code>.</p>
+<pre><code>curl --data-binary @photo.jpg \
+  -H "Content-Type: image/jpeg" \
+  -H "X-Filename: photo.jpg" \
+  {{SITE_URL}}/api/upload</code></pre>
+
+    <h3>JSON with base64</h3>
+    <p>Base64 makes the body a third bigger, so keep these files under about 3 MB.</p>
+<pre><code>curl -X POST {{SITE_URL}}/api/upload \
+  -H "Content-Type: application/json" \
+  -d '{"filename":"photo.jpg","base64":"/9j/4AAQSkZJRg..."}'</code></pre>
+
+    <h2>Response</h2>
+<pre><code>{
+  "ok": true,
+  "url": "{{SITE_URL}}/839201.jpg",
+  "id": "839201",
+  "name": "839201.jpg",
+  "ext": "jpg",
+  "type": "image/jpeg",
+  "size": 48213,
+  "sha256": "9f86d081884c7d65...",
+  "duplicate": false
+}</code></pre>
+    <p>The status is <code>201</code> for a new file. If the same file was uploaded before, the status is <code>200</code>, <code>duplicate</code> is <code>true</code>, and you get the existing link.</p>
+
+    <h2>Files over {{SINGLE_MB}} MB</h2>
+    <p>Vercel rejects any request body over 4.5 MB, so bigger files go up in parts of at most {{SINGLE_MB}} MB. The website does this for you. From code:</p>
+    <ol>
+      <li>Send each part as the raw body of <code>POST /api/upload?chunk=1</code>. Each response has a <code>blob</code> ID.</li>
+      <li>Send <code>POST /api/upload?complete=1</code> with JSON holding the <code>filename</code> and the <code>blobs</code> in order (up to {{MAX_CHUNKS}} parts). The response is the same as a normal upload.</li>
+    </ol>
+<pre><code>const API = '{{SITE_URL}}/api/upload';
+const PART = 4_000_000;
+const blobs = [];
+
+for (let i = 0; i &lt; buffer.length; i += PART) {
+  const res = await fetch(`${API}?chunk=1`, {
+    method: 'POST',
+    body: buffer.subarray(i, i + PART),
+  });
+  blobs.push((await res.json()).blob);
+}
+
+const done = await fetch(`${API}?complete=1`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ filename: 'clip.mp4', blobs }),
+});
+console.log((await done.json()).url);</code></pre>
+
+    <h2>Look up a file</h2>
+    <div class="route"><span class="verb">GET</span><code>{{SITE_URL}}/api/info?id=839201</code></div>
+    <p>You can also pass <code>name=839201.jpg</code>, or <code>sha256=…</code> to check whether a file is already hosted before you upload it. The response has the same fields as an upload, with <code>size</code> in bytes.</p>
+
+    <h2>Errors</h2>
+    <p>A failed request returns a non-2xx status and this body:</p>
+<pre><code>{ "ok": false, "code": "too_large", "error": "That file is too large. The limit is {{MAX_MB}} MB." }</code></pre>
+    <table>
+      <tr><th>code</th><th>status</th><th>meaning</th></tr>
+      <tr><td><code>blocked_type</code></td><td>400</td><td>The extension is on the block list.</td></tr>
+      <tr><td><code>empty_file</code></td><td>400</td><td>The file has no bytes.</td></tr>
+      <tr><td><code>no_file</code></td><td>400</td><td>No file was found in the request.</td></tr>
+      <tr><td><code>too_large</code></td><td>413</td><td>Over the {{MAX_MB}} MB limit.</td></tr>
+      <tr><td><code>rate_limited</code></td><td>429</td><td>GitHub is throttling uploads. The <code>Retry-After</code> header says how many seconds to wait.</td></tr>
+      <tr><td><code>storage_*</code></td><td>502</td><td>The storage behind the site had a problem. Try again shortly.</td></tr>
+    </table>
+
+    <h2>Limits</h2>
+    <ul>
+      <li>Files can be up to {{MAX_MB}} MB.</li>
+      <li>These extensions are blocked: {{BLOCKED_LIST}}.</li>
+      <li>Uploading the same bytes twice returns the same link.</li>
+      <li>Links are unlisted, not private. Anyone who has a link can open the file.</li>
+    </ul>
+
+    <h2>More examples</h2>
+    <h3>Node.js 18 or newer</h3>
+<pre><code>const form = new FormData();
+form.append('file', new Blob([buffer], { type: 'image/jpeg' }), 'photo.jpg');
+
+const res = await fetch('{{SITE_URL}}/api/upload', { method: 'POST', body: form });
+const data = await res.json();
+if (!data.ok) throw new Error(data.error);
+console.log(data.url);</code></pre>
+
+    <h3>A bot that already has the media in a buffer</h3>
+<pre><code>const res = await fetch('{{SITE_URL}}/api/upload', {
+  method: 'POST',
+  headers: { 'Content-Type': mimetype, 'X-Filename': `media.${ext}` },
+  body: buffer,
+});
+const { url } = await res.json();</code></pre>
+
+    <h3>Python</h3>
+<pre><code>import requests
+
+r = requests.post("{{SITE_URL}}/api/upload", files={"file": open("photo.jpg", "rb")})
+print(r.json()["url"])</code></pre>
+
+    <h2>Health check</h2>
+    <div class="route"><span class="verb">GET</span><code>{{SITE_URL}}/api/health</code></div>
+    <p>Returns <code>{"ok":true}</code>.</p>
+  </main>
+</body>
+</html>

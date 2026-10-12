@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>t3rribox: free file hosting with short links</title>
+  <meta name="description" content="Drop a file and get a short link like {{SITE_URL}}/839201.jpg. No account needed, files up to {{MAX_MB}} MB, plus a simple upload API.">
+  <link rel="canonical" href="{{CANONICAL}}">
+  {{GOOGLE_META}}
+  <meta name="theme-color" content="#0f1c22">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="t3rribox">
+  <meta property="og:title" content="t3rribox: free file hosting with short links">
+  <meta property="og:description" content="Drop a file, get a short link. No account needed.">
+  <meta property="og:url" content="{{CANONICAL}}">
+  <meta name="twitter:card" content="summary">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Big+Shoulders+Display:wght@800&display=swap">
+  <link rel="stylesheet" href="/style.css">
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"t3rribox","url":"{{SITE_URL_JSON}}/","description":"Free file hosting with short links. Drop a file and get a link like /839201.jpg.","applicationCategory":"UtilitiesApplication","operatingSystem":"Any","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"}}</script>
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <a class="mark" href="/">t3rribox</a>
+      <nav><a href="/docs">API docs</a></nav>
+    </header>
+
+    <h1>Drop a file. Get a short link.</h1>
+
+    <section class="locker" id="locker" aria-label="File upload">
+      <div class="plate" id="plate" aria-hidden="true">
+        <span class="digit">–</span><span class="digit">–</span><span class="digit">–</span><span class="digit">–</span><span class="digit">–</span><span class="digit">–</span><span class="ext" id="ext">–</span>
+      </div>
+
+      <div id="idle">
+        <input class="sr" id="picker" type="file">
+        <label class="pick" for="picker">
+          <p class="prompt">Drop a file here</p>
+          <span class="btn">Choose a file</span>
+          <p class="hint">Files up to {{MAX_MB}} MB. Anyone with the link can open the file.</p>
+        </label>
+      </div>
+
+      <div class="busy" id="busy" hidden>
+        <p class="fname" id="fname"></p>
+        <div class="bar" id="bar" role="progressbar" aria-label="Upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="fill"></i></div>
+        <p class="pct" id="pct"></p>
+      </div>
+
+      <div class="done" id="done" hidden>
+        <div class="linkrow">
+          <input id="link" type="text" readonly aria-label="Link to your file" spellcheck="false" autocomplete="off">
+          <button class="copy" id="copy" type="button">Copy link</button>
+        </div>
+        <span class="badge" id="dupe" hidden>♻️ Already uploaded</span>
+        <button class="again" id="again" type="button">Upload another file</button>
+      </div>
+    </section>
+
+    <noscript><p class="foot">Uploading from this page needs JavaScript. You can also use the <a href="/docs">API</a>.</p></noscript>
+    <p class="foot">Uploading from code? Use the <a href="/docs">API</a>.</p>
+  </main>
+
+  <p class="sr" id="live" aria-live="polite"></p>
+  <div class="toast" id="toast" role="alert"></div>
+
+  <script>
+  (() => {
+    const CFG = {{CONFIG_JSON}};
+    const MB = 1024 * 1024;
+    const $ = (id) => document.getElementById(id);
+    const el = {
+      locker: $('locker'), plate: $('plate'), ext: $('ext'), picker: $('picker'),
+      idle: $('idle'), busy: $('busy'), done: $('done'),
+      fname: $('fname'), bar: $('bar'), fill: $('fill'), pct: $('pct'),
+      link: $('link'), copy: $('copy'), dupe: $('dupe'), again: $('again'),
+      live: $('live'), toast: $('toast'),
+    };
+    const digits = [...document.querySelectorAll('#plate .digit')];
+    const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let working = false, roller = null, toastTimer = null, copyTimer = null;
+
+    const announce = (text) => { el.live.textContent = ''; setTimeout(() => { el.live.textContent = text; }, 50); };
+    const size = (n) => (n >= MB ? `${(n / MB).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+    const extOf = (name) => (/\.([A-Za-z0-9]{1,10})$/.exec(name.trim()) || [])[1]?.toLowerCase() || '';
+    const view = (name) => { for (const v of ['idle', 'busy', 'done']) el[v].hidden = v !== name; };
+
+    function toast(message) {
+      el.toast.textContent = message;
+      el.toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.toast.classList.remove('show'), 6500);
+    }
+    el.toast.addEventListener('click', () => el.toast.classList.remove('show'));
+
+    /* ---- the plate: digits roll while we upload, then settle on the real number ---- */
+    function setExt(text) {
+      el.ext.textContent = text || '–';
+      el.ext.classList.toggle('long', text.length > 4);
+    }
+    function rollPlate() {
+      el.plate.classList.add('lit');
+      setExt('');
+      if (reduceMotion) { digits.forEach((d) => { d.textContent = '•'; }); return; }
+      roller = setInterval(() => digits.forEach((d) => { d.classList.remove('set'); d.textContent = Math.floor(Math.random() * 10); }), 80);
+    }
+    function settlePlate(id, ext) {
+      clearInterval(roller);
+      digits.forEach((d, i) => setTimeout(() => {
+        d.textContent = id[i] ?? '';
+        d.classList.remove('set'); void d.offsetWidth; d.classList.add('set');
+      }, reduceMotion ? 0 : i * 90));
+      setTimeout(() => setExt(ext), reduceMotion ? 0 : digits.length * 90);
+    }
+    function resetPlate() {
+      clearInterval(roller);
+      el.plate.classList.remove('lit');
+      digits.forEach((d) => { d.classList.remove('set'); d.textContent = '–'; });
+      setExt('');
+    }
+
+    /* ---- network ---- */
+    function send(url, { body, headers = {}, onProgress } = {}) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url);
+        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+        if (onProgress) xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+        xhr.onerror = xhr.ontimeout = () => {
+          const err = new Error('Network error. Check your connection and try again.');
+          err.retry = true;
+          reject(err);
+        };
+        xhr.onload = () => {
+          let data = null;
+          try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+          if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) return resolve(data);
+          const err = new Error(
+            (data && data.error) ||
+            (xhr.status === 413 ? 'That upload is too large for the server.' : `Upload failed (${xhr.status}). Please try again.`)
+          );
+          err.retry = ['storage_unreachable', 'storage_down', 'conflict'].includes(data && data.code);
+          reject(err);
+        };
+        xhr.send(body);
+      });
+    }
+    async function withRetry(run, tries = 3) {
+      for (let attempt = 1; ; attempt++) {
+        try { return await run(); }
+        catch (err) {
+          if (!err.retry || attempt >= tries) throw err;
+          await new Promise((r) => setTimeout(r, 600 * attempt));
+        }
+      }
+    }
+
+    async function singleUpload(file, onBytes) {
+      const body = new FormData();
+      body.append('file', file, file.name);
+      return send('/api/upload', { body, onProgress: onBytes });
+    }
+
+    // Vercel rejects request bodies over 4.5 MB, so big files go up in parts.
+    async function chunkedUpload(file, onBytes) {
+      const blobs = [];
+      let sent = 0;
+      for (let start = 0; start < file.size; start += CFG.chunkBytes) {
+        const part = file.slice(start, start + CFG.chunkBytes);
+        const res = await withRetry(() => send('/api/upload?chunk=1', {
+          body: part,
+          headers: { 'Content-Type': 'application/octet-stream' },
+          onProgress: (n) => onBytes(sent + n),
+        }));
+        sent += part.size;
+        onBytes(sent);
+        blobs.push(res.blob);
+      }
+      return withRetry(() => send('/api/upload?complete=1', {
+        body: JSON.stringify({ filename: file.name, mimetype: file.type, blobs }),
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    }
+
+    // Skip the upload entirely when the server already has these exact bytes.
+    async function existingCopy(file) {
+      try {
+        if (!(window.crypto && crypto.subtle)) return null;
+        const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))]
+          .map((b) => b.toString(16).padStart(2, '0')).join('');
+        const res = await fetch('/api/info?sha256=' + hash);
+        if (!res.ok) return null;
+        const info = await res.json();
+        return info && info.ok ? { ...info, duplicate: true } : null;
+      } catch { return null; }
+    }
+
+    /* ---- flow ---- */
+    function progress(percent, label) {
+      el.fill.style.width = percent + '%';
+      el.bar.setAttribute('aria-valuenow', String(Math.round(percent)));
+      el.pct.textContent = label;
+    }
+
+    function validate(file) {
+      if (!file.size) throw new Error('That file is empty.');
+      if (file.size > CFG.maxBytes) throw new Error(`That file is too large. The limit is ${CFG.maxBytes / MB} MB.`);
+      const ext = extOf(file.name);
+      if (ext && CFG.blocked.includes(ext)) throw new Error(`.${ext} files aren't allowed.`);
+    }
+
+    async function handle(file) {
+      if (working) return;
+      try { validate(file); } catch (err) { toast(err.message); return; }
+      working = true;
+      el.fname.textContent = `${file.name} (${size(file.size)})`;
+      progress(0, 'Starting…');
+      view('busy');
+      rollPlate();
+      announce(`Uploading ${file.name}`);
+
+      const big = file.size > CFG.singleBytes;
+      const onBytes = (n) => {
+        const percent = Math.min(99, Math.floor((n / file.size) * 100));
+        progress(percent, n >= file.size ? 'Saving…' : `${percent}%`);
+      };
+      try {
+        let data = null;
+        if (big) { progress(0, 'Checking…'); data = await existingCopy(file); }
+        if (!data) data = await (big ? chunkedUpload(file, onBytes) : singleUpload(file, onBytes));
+        finish(data);
+      } catch (err) {
+        resetPlate();
+        view('idle');
+        toast(err.message || 'Upload failed. Please try again.');
+      } finally {
+        working = false;
+      }
+    }
+
+    function finish(data) {
+      progress(100, 'Done');
+      settlePlate(String(data.id), String(data.ext));
+      el.link.value = data.url;
+      el.dupe.hidden = !data.duplicate;
+      el.copy.textContent = 'Copy link';
+      delete el.copy.dataset.state;
+      view('done');
+      announce(data.duplicate ? 'Already uploaded. Your link is ready.' : 'Your link is ready.');
+    }
+
+    /* ---- events ---- */
+    el.picker.addEventListener('change', () => {
+      const file = el.picker.files[0];
+      el.picker.value = '';
+      if (file) handle(file);
+    });
+
+    el.copy.addEventListener('click', async () => {
+      const text = el.link.value;
+      try { await navigator.clipboard.writeText(text); }
+      catch {
+        el.link.focus(); el.link.select(); el.link.setSelectionRange(0, text.length);
+        try { document.execCommand('copy'); } catch { /* the link is selected, so the user can copy it */ }
+      }
+      el.copy.textContent = 'Copied';
+      el.copy.dataset.state = 'copied';
+      announce('Link copied');
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => { el.copy.textContent = 'Copy link'; delete el.copy.dataset.state; }, 1800);
+    });
+    el.link.addEventListener('focus', () => el.link.select());
+
+    el.again.addEventListener('click', () => { resetPlate(); view('idle'); });
+
+    const hasFiles = (e) => [...((e.dataTransfer && e.dataTransfer.types) || [])].includes('Files');
+    let depth = 0;
+    addEventListener('dragenter', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth++;
+      el.locker.classList.add('over');
+      el.plate.classList.add('lit');
+    });
+    addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+    addEventListener('dragleave', (e) => {
+      if (!hasFiles(e)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth) return;
+      el.locker.classList.remove('over');
+      if (!el.idle.hidden) el.plate.classList.remove('lit');
+    });
+    addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0;
+      el.locker.classList.remove('over');
+      const files = e.dataTransfer.files;
+      if (!files.length) return;
+      if (files.length > 1) toast('One file at a time. Uploading the first one.');
+      handle(files[0]);
+    });
+  })();
+  </script>
+</body>
+</html>
